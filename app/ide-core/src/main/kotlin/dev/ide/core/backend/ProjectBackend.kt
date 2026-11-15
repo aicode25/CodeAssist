@@ -34,6 +34,7 @@ import dev.ide.ui.backend.UiConvertResult
 import dev.ide.ui.backend.UiProjectFolderKind
 import dev.ide.ui.backend.UiProjectResult
 import dev.ide.ui.backend.UiProjectTemplate
+import dev.ide.ui.backend.UiSharedProjectRoot
 import dev.ide.ui.backend.UiStorageCategory
 import dev.ide.ui.backend.UiStorageProject
 import dev.ide.ui.backend.UiStorageReport
@@ -187,6 +188,47 @@ internal class ProjectBackend(
     override suspend fun backupProjects(): String? {
         val mgr = ctx.manager ?: return null
         return withContext(Dispatchers.IO) { runCatching { mgr.exportBackup().toString() }.getOrNull() }
+    }
+
+    // ---- shared project roots ----
+
+    override fun sharedProjectRoots(): List<UiSharedProjectRoot> = ctx.manager?.sharedProjectRoots().orEmpty()
+        .map { root ->
+            val path = runCatching { Paths.get(root.path) }.getOrNull()
+            UiSharedProjectRoot(
+                path = root.path,
+                treeUri = root.treeUri,
+                label = root.label,
+                available = path != null && runCatching {
+                    Files.isDirectory(path) && Files.isReadable(path) && Files.isWritable(path)
+                }.getOrDefault(false),
+            )
+        }
+
+    override suspend fun registerSharedProjectRoot(
+        path: String,
+        treeUri: String?,
+        label: String?,
+    ): UiSharedProjectRoot? {
+        val mgr = ctx.manager ?: return null
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                val root = mgr.registerSharedProjectRoot(path, treeUri, label)
+                UiSharedProjectRoot(root.path, root.treeUri, root.label, available = true)
+            }.getOrElse { e ->
+                log.warn("shared root: couldn't register $path", e)
+                null
+            }
+        }
+    }
+
+    override suspend fun unregisterSharedProjectRoot(path: String): Boolean {
+        val mgr = ctx.manager ?: return false
+        return withContext(Dispatchers.IO) {
+            runCatching { mgr.unregisterSharedProjectRoot(path) }
+                .onFailure { log.warn("shared root: couldn't remove $path", it) }
+                .getOrDefault(false)
+        }
     }
 
     // ---- storage usage + cleanup ----

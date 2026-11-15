@@ -8,6 +8,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import dev.ide.ui.backend.IdeBackend
+import dev.ide.ui.backend.SharedProjectRootSelection
+import dev.ide.ui.backend.UiSharedProjectRoot
 import dev.ide.ui.backend.UiStorageCategory
 import dev.ide.ui.backend.UiStorageProject
 import dev.ide.ui.backend.UiStorageReport
@@ -29,6 +31,15 @@ internal class StorageScreenState(
     var loading: Boolean by mutableStateOf(true)
         private set
     var busy: Boolean by mutableStateOf(false)
+        private set
+
+    /** Registered shared real-path roots, shown beside the usage report. */
+    var sharedRoots: List<UiSharedProjectRoot> by mutableStateOf(emptyList())
+        private set
+    var sharedBusy: Boolean by mutableStateOf(false)
+        private set
+    /** True after a registration/removal failed, so the card can explain without inventing an error code. */
+    var sharedRootFailed: Boolean by mutableStateOf(false)
         private set
 
     /** How many bytes the last reclaim freed, for the confirmation toast (null once it is dismissed). */
@@ -54,6 +65,36 @@ internal class StorageScreenState(
     fun cancelDeleteProject() { pendingProjectDelete = null }
 
     fun dismissFreedToast() { freedBytes = null }
+
+    fun dismissSharedRootFailure() { sharedRootFailed = false }
+
+    /** Register a picked real folder. No files are moved or copied; the directory becomes listable in place. */
+    fun addSharedRoot(selection: SharedProjectRootSelection) {
+        if (sharedBusy) return
+        scope.launch {
+            sharedBusy = true
+            sharedRootFailed = false
+            val registered = backend.projects.registerSharedProjectRoot(
+                selection.path,
+                selection.treeUri,
+                selection.label,
+            )
+            sharedRootFailed = registered == null
+            reloadNow()
+            sharedBusy = false
+        }
+    }
+
+    /** Forget a shared root. The directory and its projects are never deleted. */
+    fun removeSharedRoot(root: UiSharedProjectRoot) {
+        if (sharedBusy) return
+        scope.launch {
+            sharedBusy = true
+            sharedRootFailed = !backend.projects.unregisterSharedProjectRoot(root.path)
+            reloadNow()
+            sharedBusy = false
+        }
+    }
 
     /** Clear one category, report how much it freed, then recompute. */
     fun clear(category: UiStorageCategory) {
@@ -110,6 +151,7 @@ internal class StorageScreenState(
     private suspend fun reloadNow() {
         loading = true
         report = backend.projects.storageReport()
+        sharedRoots = backend.projects.sharedProjectRoots()
         loading = false
     }
 }

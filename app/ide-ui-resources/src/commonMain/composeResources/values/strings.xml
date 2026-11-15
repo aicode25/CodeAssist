@@ -1516,6 +1516,16 @@ We never collect your code, file or project names, what you type, or anything th
     <string name="storage_open_badge">Open</string>
     <string name="storage_unavailable">Storage information isn't available.</string>
     <string name="storage_freed">Freed %1$s</string>
+    <string name="storage_shared_roots_title">Shared project folders</string>
+    <string name="storage_shared_roots_body">Use a real folder on public storage so a terminal such as Termux can edit the same files. Adding a folder never moves or copies your projects.</string>
+    <string name="storage_shared_roots_add">Add shared folder</string>
+    <string name="storage_shared_roots_grant_access">Grant All-files access</string>
+    <string name="storage_shared_roots_granted">All-files access is granted.</string>
+    <string name="storage_shared_roots_not_granted">All-files access is not granted.</string>
+    <string name="storage_shared_roots_empty">No shared folders yet.</string>
+    <string name="storage_shared_roots_remove">Remove</string>
+    <string name="storage_shared_roots_unavailable">Unavailable</string>
+    <string name="storage_shared_roots_failed">Couldn't add that folder. Choose a real folder on internal storage or an SD card, not Android/data, Android/obb, or a cloud provider.</string>
     <string name="storage_clear_sdk_title">Clear the Android SDK?</string>
     <string name="storage_clear_sdk_body">This removes the downloaded SDK components and downloads (%1$s). They'll be downloaded again the next time a build needs them.</string>
     <string name="storage_clear_leftovers_title">Remove leftover folders?</string>

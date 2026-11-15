@@ -643,6 +643,7 @@ private fun AppRoute(
             // A project closed behind Home is still loaded; it is not "open" and may be deleted here.
             projectOpen = app.projectOpen,
             onBack = { app.navigateTo(Screen.Hub) },
+            fileActions = fileActions,
         )
 
         Screen.CodeStyle -> CodeStyleScreen(

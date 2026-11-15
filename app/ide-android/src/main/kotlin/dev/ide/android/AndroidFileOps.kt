@@ -1,11 +1,17 @@
 package dev.ide.android
 
+import android.Manifest
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.os.storage.StorageManager
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.core.content.FileProvider
@@ -16,6 +22,7 @@ import kotlinx.coroutines.withContext
 import dev.ide.core.project.CaprojFormat
 import dev.ide.platform.ProjectFiles
 import dev.ide.ui.backend.IdeBackend
+import dev.ide.ui.backend.SharedProjectRootSelection
 import java.io.File
 
 /**
@@ -59,7 +66,7 @@ internal class AndroidFileOps(private val activity: ComponentActivity) {
     /** Copy [uri]'s bytes into a new file under [targetDir]; returns the new path or null. Blocking provider I/O
      *  (a cloud document can take seconds), so call it off the main thread. */
     fun importUri(uri: Uri, targetDir: String, backend: IdeBackend): String? = runCatching {
-        val name = queryDisplayName(uri) ?: "imported-${System.currentTimeMillis()}"
+        val name = safeFileName(queryDisplayName(uri), "imported-${System.currentTimeMillis()}")
         val bytes = activity.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return null
         backend.files.createFileBytes(targetDir, name, bytes)
     }.getOrNull()
@@ -67,7 +74,8 @@ internal class AndroidFileOps(private val activity: ComponentActivity) {
     /** Copy an inbound (`Open with`) file into a uniquely-named cache path so each hand-off is a distinct
      *  path (the import preview re-opens on each new path). Returns the real path or null. */
     fun copyInboundToCache(uri: Uri, name: String): String? = runCatching {
-        val dest = File(activity.cacheDir, "import-${System.currentTimeMillis()}-$name")
+        val safeName = safeFileName(name, "file")
+        val dest = File(activity.cacheDir, "import-${System.currentTimeMillis()}-$safeName")
         activity.contentResolver.openInputStream(uri)
             ?.use { input -> dest.outputStream().use { input.copyTo(it) } } ?: return null
         dest.absolutePath
@@ -112,6 +120,9 @@ internal class AndroidFileOps(private val activity: ComponentActivity) {
             val mimeIdx = c.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
             while (c.moveToNext()) {
                 val childName = c.getString(nameIdx) ?: continue
+                // Provider display names are untrusted: a document called `../x` must not escape the cache
+                // copy. Only plain single-component names are materialized; anything else is skipped.
+                if (!isSimpleFileName(childName)) continue
                 val isDir = c.getString(mimeIdx) == DocumentsContract.Document.MIME_TYPE_DIR
                 val childRel = if (relDir.isEmpty()) childName else "$relDir/$childName"
                 // Skip regenerable build outputs / IDE metadata to keep the copy small (the engine's importer
@@ -134,7 +145,7 @@ internal class AndroidFileOps(private val activity: ComponentActivity) {
 
     /** Copy a picked content:// file into the app cache and return its real path (keystores, screenshots). */
     fun copyUriToCache(uri: Uri): String? = runCatching {
-        val name = queryDisplayName(uri) ?: "picked-${System.currentTimeMillis()}"
+        val name = safeFileName(queryDisplayName(uri), "picked-${System.currentTimeMillis()}")
         // Keyed by the document URI, not by the display name alone. Two screenshots from different folders
         // are both called "Screenshot_2026-09-12.png", and a name-only path made the second overwrite the
         // first and come back as a path the caller had already recorded: the publish form dropped it as a
@@ -235,6 +246,85 @@ internal class AndroidFileOps(private val activity: ComponentActivity) {
         activity.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }.getOrElse { Toast.makeText(activity, "No app to open links", Toast.LENGTH_SHORT).show() }
 
+    /**
+     * Whether this build declares the All-files permission. It is debug/profile-only (see the flavor
+     * manifests), so release builds report false and the UI hides the shared-folder controls instead of
+     * sending the user to a settings page that cannot grant anything.
+     */
+    fun canManageAllFilesAccess(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
+        val info = runCatching {
+            activity.packageManager.getPackageInfo(activity.packageName, PackageManager.GET_PERMISSIONS)
+        }.getOrNull() ?: return false
+        return info.requestedPermissions?.contains(Manifest.permission.MANAGE_EXTERNAL_STORAGE) == true
+    }
+
+    /** Whether Android's All-files access is granted. Direct public-storage paths need API 30+ and the grant. */
+    fun hasAllFilesAccess(): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && Environment.isExternalStorageManager()
+
+    /**
+     * Open the system All-files access settings for this app. Some ROMs do not expose the app-specific page, so
+     * fall back to the global list and then to the app's details page rather than leaving the user stuck.
+     */
+    fun openAllFilesAccessSettings() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        val packageUri = Uri.parse("package:${activity.packageName}")
+        val candidates = listOf(
+            Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, packageUri),
+            Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION),
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, packageUri),
+        )
+        for (intent in candidates) {
+            if (runCatching { activity.startActivity(intent); true }.getOrDefault(false)) return
+        }
+        Toast.makeText(activity, "Open Settings → Apps → CodeAssist → Files and media", Toast.LENGTH_LONG).show()
+    }
+
+    /**
+     * Resolve a SAF tree to the real public-storage directory it represents, persist the read/write grant for
+     * later sessions, and return that directory. Only the ExternalStorageProvider has a real path; cloud
+     * providers cannot be read by the engine as files, and Android's `Android/data`/`Android/obb` folders are
+     * never valid shared roots. Returns null when the tree cannot be used directly.
+     */
+    fun prepareSharedRoot(treeUri: Uri): SharedProjectRootSelection? {
+        if (treeUri.authority != EXTERNAL_STORAGE_AUTHORITY) return null
+        if (!canManageAllFilesAccess() || !hasAllFilesAccess()) return null
+        val docId = runCatching { DocumentsContract.getTreeDocumentId(treeUri) }.getOrNull() ?: return null
+        val volumeId = docId.substringBefore(':', missingDelimiterValue = "")
+        val relative = docId.substringAfter(':', missingDelimiterValue = "")
+        if (volumeId.isEmpty()) return null
+        // The volume root itself is too broad: its direct children include the whole public storage tree.
+        if (relative.isEmpty() || relative.startsWith('/')) return null
+        if (relative.split('/').any { it == ".." || it.isEmpty() || it.contains('\u0000') }) return null
+        val volume = externalStorageVolume(volumeId) ?: return null
+        val dir = File(volume, relative)
+        if (!dir.isDirectory || !dir.canRead() || !dir.canWrite()) return null
+        val canonical = runCatching { dir.canonicalFile }.getOrNull() ?: return null
+        val volumeCanonical = runCatching { volume.canonicalFile }.getOrNull() ?: return null
+        // A symlink inside public storage must not escape the selected volume (or reach Android/data).
+        if (!canonical.toPath().startsWith(volumeCanonical.toPath())) return null
+        val path = canonical.absolutePath
+        val normalized = path.replace('\\', '/')
+        if (Regex("(^|/)Android/(data|obb)(/|$)").containsMatchIn(normalized)) return null
+        val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        runCatching { activity.contentResolver.takePersistableUriPermission(treeUri, flags) }
+        return SharedProjectRootSelection(
+            path = path,
+            treeUri = treeUri.toString(),
+            label = canonical.name.takeIf { it.isNotBlank() && it != "/" },
+        )
+    }
+
+    private fun externalStorageVolume(volumeId: String): File? = when (volumeId) {
+        "primary" -> Environment.getExternalStorageDirectory()
+        else -> {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+            val manager = activity.getSystemService(Context.STORAGE_SERVICE) as? StorageManager ?: return null
+            manager.storageVolumes.firstOrNull { it.uuid?.equals(volumeId, ignoreCase = true) == true }?.directory
+        }
+    }
+
     fun queryDisplayName(uri: Uri): String? = runCatching {
         if (uri.scheme == "file") return uri.lastPathSegment
         activity.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
@@ -251,5 +341,25 @@ internal class AndroidFileOps(private val activity: ComponentActivity) {
         path.endsWith(".zip") || path.endsWith(".jar") -> "application/zip"
         path.endsWith(".txt") || path.endsWith(".kt") || path.endsWith(".java") || path.endsWith(".xml") -> "text/plain"
         else -> "application/octet-stream"
+    }
+
+    /**
+     * Whether [name] is one plain path component. Document providers (and inbound intents) supply display
+     * names, and a hostile or buggy one can contain separators or `.`/`..`; those must never be joined onto a
+     * target directory, or a copy/import could write outside it.
+     */
+    private fun isSimpleFileName(name: String): Boolean =
+        name.isNotEmpty() && name != "." && name != ".." &&
+            name.none { it == '/' || it == '\\' || it == '\u0000' }
+
+    /** [raw] reduced to a safe single-component file name, or [fallback] when it has no usable one. */
+    private fun safeFileName(raw: String?, fallback: String): String {
+        val base = raw?.trim().orEmpty().substringAfterLast('/').substringAfterLast('\\').trim()
+        return if (isSimpleFileName(base)) base else fallback
+    }
+
+    private companion object {
+        /** The AOSP provider that exposes real public-storage paths; other SAF providers have no direct path. */
+        const val EXTERNAL_STORAGE_AUTHORITY = "com.android.externalstorage.documents"
     }
 }

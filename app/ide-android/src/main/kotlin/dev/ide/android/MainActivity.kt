@@ -30,6 +30,7 @@ import dev.ide.ui.ext.PreviewSnapshots
 import dev.ide.android.preview.SurfaceComposer
 import dev.ide.ui.backend.FileActions
 import dev.ide.ui.backend.IdeBackend
+import dev.ide.ui.backend.SharedProjectRootSelection
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -190,6 +191,27 @@ open class MainActivity : ComponentActivity() {
                         cb?.invoke(path)
                     }
                 }
+            // Shared real-path root (All-files mode): unlike the import picker above, this does NOT copy the
+            // tree. The host resolves the SAF tree to its public-storage directory, persists the URI grant, and
+            // the backend registers that real path so CodeAssist and a terminal edit the same files.
+            var pendingPickSharedRoot by remember { mutableStateOf<((SharedProjectRootSelection?) -> Unit)?>(null) }
+            val pickSharedRootLauncher =
+                rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+                    val cb = pendingPickSharedRoot
+                    pendingPickSharedRoot = null
+                    if (uri == null) { cb?.invoke(null); return@rememberLauncherForActivityResult }
+                    hostScope.launch {
+                        val selection = withContext(Dispatchers.IO) { fileOps.prepareSharedRoot(uri) }
+                        if (selection == null) {
+                            Toast.makeText(
+                                this@MainActivity,
+                                "Choose a folder on internal storage or an SD card, not Android/data or a cloud provider.",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                        }
+                        cb?.invoke(selection)
+                    }
+                }
             // "Save As" export: the user picks a destination (Files/Drive/Downloads); we copy the bytes there.
             var pendingExport by remember { mutableStateOf<String?>(null) }
             val exportLauncher =
@@ -267,6 +289,22 @@ open class MainActivity : ComponentActivity() {
                             pickDirLauncher.launch(null)
                         } catch (e: ActivityNotFoundException) {
                             pendingPickDir = null
+                            onPicked(null)
+                            Toast.makeText(this@MainActivity, "No file manager available to pick a folder", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+
+                    override val canManageAllFilesAccess: Boolean = fileOps.canManageAllFilesAccess()
+                    override fun hasAllFilesAccess(): Boolean = fileOps.hasAllFilesAccess()
+                    override fun openAllFilesAccessSettings() = fileOps.openAllFilesAccessSettings()
+
+                    override val canPickSharedRoot: Boolean = fileOps.canManageAllFilesAccess()
+                    override fun pickSharedRoot(onPicked: (SharedProjectRootSelection?) -> Unit) {
+                        pendingPickSharedRoot = onPicked
+                        try {
+                            pickSharedRootLauncher.launch(null)
+                        } catch (e: ActivityNotFoundException) {
+                            pendingPickSharedRoot = null
                             onPicked(null)
                             Toast.makeText(this@MainActivity, "No file manager available to pick a folder", Toast.LENGTH_SHORT).show()
                         }

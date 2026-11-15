@@ -41,6 +41,7 @@ import dev.ide.model.impl.ModelPersistence
 import dev.ide.model.impl.ProjectData
 import dev.ide.model.impl.ProjectModelStore
 import dev.ide.model.impl.SdkData
+import dev.ide.model.impl.format.Json
 import dev.ide.model.template.ProjectTemplate
 import dev.ide.model.template.TemplateArgs
 import dev.ide.platform.ServiceContainer
@@ -121,6 +122,21 @@ enum class ImportableKind {
     /** Neither -- the caller should say so rather than silently doing nothing. */
     NONE,
 }
+
+/**
+ * A user-registered directory that holds projects as direct children. Its [path] is canonical and points at
+ * a real filesystem directory, so the engine can open projects there as ordinary [Path]s. Unregistering a
+ * root only forgets the directory; it never deletes its contents.
+ *
+ * [treeUri] is the SAF tree the host picked it through (Android only), kept for provenance and for showing
+ * which permission-backed folder this is. The direct-file mode reads and writes [path], not the URI.
+ */
+data class SharedProjectRoot(
+    val path: String,
+    val treeUri: String? = null,
+    val label: String? = null,
+    val addedAt: Long = 0L,
+)
 
 /**
  * Owns the on-disk set of projects (one workspace dir per project under [projectsRoot]) and the
@@ -358,25 +374,36 @@ class ProjectManager private constructor(
     private val backupRoots: List<Path> get() = listOf(projectsRoot) + legacyDataDirs
 
     /**
-     * Existing projects (subdirs of [projectsRoot] holding a saved model), most-recently-opened first
-     * (projects never opened since this was recorded fall to the bottom, ordered by name). The last-opened
-     * timestamps live in the shared prefs file, stamped by [recordOpened] on open/create.
+     * Existing projects (direct children of [projectsRoot] or a registered shared root holding a saved
+     * model), most-recently-opened first (projects never opened since this was recorded fall to the bottom,
+     * ordered by name). The last-opened timestamps live in the shared prefs file, stamped by [recordOpened]
+     * on open/create.
      */
     fun list(): List<ProjectSummary> {
-        if (!Files.isDirectory(projectsRoot)) return emptyList()
-        // An unreadable projects root reads as "no projects", not as a crash. This runs on every render of
-        // the home screen, so a throw here (AccessDeniedException, seen in the field) escapes through
-        // ProjectBackend.projects into composition and takes the app down before it can draw anything --
-        // leaving no way back in. An empty picker is recoverable; a boot loop is not.
-        val dirs = runCatching { Files.newDirectoryStream(projectsRoot).use { it.toList() } }
-            .onFailure { log.warn("project list: $projectsRoot could not be read", it) }
-            .getOrElse { return emptyList() }
         val prefs = cachedPrefs()
-        return dirs
-            .filter { runCatching { Files.isDirectory(it) && ModelPersistence.exists(it.toString()) }.getOrDefault(false) }
-            .map { dir ->
-                val proj = runCatching { ModelPersistence.load(dir.toString()) }.getOrNull()?.projects?.firstOrNull()
-                ProjectSummary(
+        val seen = HashSet<String>()
+        val projects = ArrayList<ProjectSummary>()
+        for (root in managedRoots()) {
+            // An unreadable root reads as "no projects", not as a crash. This runs on every render of the
+            // home screen, so a throw here (AccessDeniedException, seen in the field) escapes through
+            // ProjectBackend.projects into composition and takes the app down before it can draw anything --
+            // leaving no way back in. An empty picker is recoverable; a boot loop is not.
+            val dirs = runCatching { Files.newDirectoryStream(root).use { it.toList() } }
+                .onFailure { log.warn("project list: $root could not be read", it) }
+                .getOrNull() ?: continue
+            for (raw in dirs) {
+                if (Files.isSymbolicLink(raw)) continue
+                val dir = runCatching { raw.toRealPath() }.getOrNull() ?: continue
+                if (dir.parent != root || !seen.add(dir.toString())) continue
+                if (!runCatching {
+                        Files.isDirectory(dir) && ModelPersistence.exists(dir.toString())
+                    }.getOrDefault(false)
+                ) {
+                    continue
+                }
+                val proj = runCatching { ModelPersistence.load(dir.toString()) }.getOrNull()
+                    ?.projects?.firstOrNull()
+                projects += ProjectSummary(
                     proj?.name ?: dir.fileName.toString(),
                     dir.toString(),
                     proj?.modules?.size ?: 0,
@@ -387,20 +414,23 @@ class ProjectManager private constructor(
                     unrecognized = proj?.modules.isNullOrEmpty() && UnrecognizedProjectMarker.exists(dir),
                 )
             }
-            .sortedWith(compareByDescending<ProjectSummary> { it.lastOpened }.thenBy { it.name.lowercase() })
+        }
+        return projects.sortedWith(
+            compareByDescending<ProjectSummary> { it.lastOpened }.thenBy { it.name.lowercase() },
+        )
     }
 
     /** Prefs key holding a project's last-opened timestamp (keyed by its unique workspace directory name). */
     private fun openedKey(dir: Path): String = "project.opened.${dir.fileName}"
 
     /**
-     * Stamp [dir] as opened *now*, so the picker floats it to the top. Guarded to a direct child of
-     * [projectsRoot] (scratch/build-daemon dirs live elsewhere and never affect the picker order), and
+     * Stamp [dir] as opened *now*, so the picker floats it to the top. Guarded to a direct child of a
+     * managed root (scratch/build-daemon dirs live elsewhere and never affect the picker order), and
      * best-effort — a failed prefs write must never block opening a project.
      */
     private fun recordOpened(dir: Path) {
         val normalized = dir.toAbsolutePath().normalize()
-        if (normalized.parent != projectsRoot.toAbsolutePath().normalize()) return
+        if (managedRootFor(normalized) == null) return
         runCatching { setPreference(openedKey(normalized), System.currentTimeMillis().toString()) }
     }
 
@@ -582,8 +612,8 @@ class ProjectManager private constructor(
      */
     fun adoptProjectInPlace(dir: Path): Boolean {
         val here = dir.toAbsolutePath().normalize()
-        require(here.parent == projectsRoot.toAbsolutePath().normalize() && here != projectsRoot) {
-            "Refusing to adopt a path outside the projects directory: $here"
+        require(managedRootFor(here) != null) {
+            "Refusing to adopt a path outside the managed project directories: $here"
         }
         // Packaged by CodeAssist (the usual case, since submissions are zipped by the IDE): the model
         // travelled with it and there is nothing to translate.
@@ -607,8 +637,8 @@ class ProjectManager private constructor(
      */
     fun adoptFolderInPlace(dir: Path, origin: String = ""): ImportableKind {
         val here = dir.toAbsolutePath().normalize()
-        require(here.parent == projectsRoot.toAbsolutePath().normalize() && here != projectsRoot) {
-            "Refusing to adopt a path outside the projects directory: $here"
+        require(managedRootFor(here) != null) {
+            "Refusing to adopt a path outside the managed project directories: $here"
         }
         val kind = inspectFolder(here)
         // An importer claiming the folder can still fail on its contents (an unreadable build script). The
@@ -621,25 +651,35 @@ class ProjectManager private constructor(
     }
 
     /**
-     * Permanently delete the project rooted at [rootPath] from disk. Guarded to a direct child of
-     * [projectsRoot] so a stray path can never wipe an unrelated directory; a missing project is a no-op.
+     * Permanently delete the project rooted at [rootPath] from disk. Guarded to a direct child of a managed
+     * project root so a stray path can never wipe an unrelated directory; a missing project is a no-op.
      * Returns whether the project is gone.
      *
-     * The folder is first moved into [trashDir], in one rename on the same volume, and removed from there.
-     * Deleting in place could stop halfway (a file it could not remove, or one written into the folder while
-     * it ran), and the walk removes `.platform/workspace.json` before the caches beside it, so what was left
-     * was a folder the picker no longer lists but the store still took for the installed project. Whatever
-     * cannot be removed now stays in the trash, out of sight, and [purgeTrash] retries it at the next start.
+     * Under CodeAssist's own projects root the folder is first moved into `.trash`, in one rename on the same
+     * volume, and removed from there; whatever cannot be removed stays out of sight and [purgeTrash] retries
+     * it at the next start. A shared root is user-owned (a terminal such as Termux can see it too), so its
+     * projects are deleted in place: the app never creates a hidden trash folder in someone else's directory.
      */
     fun delete(rootPath: String): Boolean {
         val dir = Paths.get(rootPath).toAbsolutePath().normalize()
-        val root = projectsRoot.toAbsolutePath().normalize()
-        require(dir.parent == root && dir != root) { "Refusing to delete a path outside the projects directory: $dir" }
+        val root = managedRootFor(dir)
+        require(root != null) { "Refusing to delete a path outside the managed project directories: $dir" }
         if (!Files.exists(dir)) return true
-        val trashed = runCatching {
-            Files.createDirectories(trashDir)
-            Files.move(dir, trashDir.resolve("${dir.fileName}-${System.currentTimeMillis()}"))
-        }.onFailure { log.warn("delete: couldn't move $dir to the trash, deleting it in place", it) }.getOrNull()
+        // Only CodeAssist's own root gets a trash folder. A shared root belongs to the user (and to a terminal
+        // such as Termux), so writing a hidden `.trash` there could overwrite their data; delete in place instead.
+        val trashed = if (isProjectsRoot(root)) {
+            val trash = trashDir
+            if (Files.isSymbolicLink(trash) || (Files.exists(trash) && !Files.isDirectory(trash))) {
+                null
+            } else {
+                runCatching {
+                    Files.createDirectories(trash)
+                    Files.move(dir, trash.resolve("${dir.fileName}-${System.currentTimeMillis()}"))
+                }.onFailure { log.warn("delete: couldn't move $dir to the trash, deleting it in place", it) }.getOrNull()
+            }
+        } else {
+            null
+        }
         val cleared = deleteTreeLenient(trashed ?: dir)
         if (!cleared) log.warn("delete: some of ${trashed ?: dir} could not be removed")
         return !Files.exists(dir)
@@ -648,10 +688,11 @@ class ProjectManager private constructor(
     /** Where [delete] moves a project before removing it. Not a project itself, so [list] never shows it. */
     private val trashDir: Path get() = projectsRoot.resolve(TRASH_DIR)
 
-    /** Remove what [delete] left in [trashDir]. */
+    /** Remove what [delete] left in CodeAssist's own trash. Shared roots never get one (see [delete]). */
     fun purgeTrash() {
-        if (deleteTreeLenient(trashDir)) return
-        log.warn("trash: ${trashDir} could not be fully removed")
+        val trash = trashDir
+        if (!Files.exists(trash, LinkOption.NOFOLLOW_LINKS)) return
+        if (!deleteTreeLenient(trash)) log.warn("trash: $trash could not be fully removed")
     }
 
     /**
@@ -715,8 +756,9 @@ class ProjectManager private constructor(
         val newName = name.trim()
         if (newName.isEmpty()) return false
         val dir = Paths.get(rootPath).toAbsolutePath().normalize()
-        val root = projectsRoot.toAbsolutePath().normalize()
-        require(dir.parent == root && dir != root) { "Refusing to rename a project outside the projects directory: $dir" }
+        require(managedRootFor(dir) != null) {
+            "Refusing to rename a project outside the managed project directories: $dir"
+        }
         if (live == null) return ProjectPackaging.renameProject(dir, newName)
         val data = live.data
         live.commit(data.copy(projects = data.projects.map { it.copy(name = newName) }), emptyList())
@@ -821,6 +863,152 @@ class ProjectManager private constructor(
     fun setConsentedPlugins(ids: Set<String>) {
         setPreference(CONSENTED_PLUGINS_KEY, ids.sorted().joinToString(","))
         pluginChanges.choicesChanged(disabledPlugins(), ids)
+    }
+
+    // --- shared project roots ---
+
+    /**
+     * Directories the user registered as shared project roots. A root's projects are listed alongside the
+     * app's own projects and opened in place, so a terminal can edit the exact same files. Paths are stored
+     * exactly as registered (canonical); a root that has become unavailable is still returned so the UI can
+     * explain it, while [list] simply skips it.
+     */
+    fun sharedProjectRoots(): List<SharedProjectRoot> = readSharedRoots()
+
+    /**
+     * Register [path] as a shared project root without moving, copying, or deleting anything. The path is
+     * resolved to its canonical real directory and must be readable/writable. Re-registering the same canonical
+     * directory updates its [treeUri]/[label] in place.
+     *
+     * @throws IllegalArgumentException when [path] is not an existing, usable directory outside the app home.
+     */
+    fun registerSharedProjectRoot(path: String, treeUri: String? = null, label: String? = null): SharedProjectRoot {
+        val canonical = canonicalSharedRoot(path)
+        val existing = readSharedRoots()
+        val root = SharedProjectRoot(
+            path = canonical.toString(),
+            treeUri = treeUri?.trim()?.ifEmpty { null },
+            label = label?.trim()?.ifEmpty { null },
+            addedAt = existing.firstOrNull { it.path == canonical.toString() }?.addedAt
+                ?: System.currentTimeMillis(),
+        )
+        val next = existing.filterNot { it.path == root.path } + root
+        writeSharedRoots(next)
+        return root
+    }
+
+    /**
+     * Forget the shared root at [path]. This is a registry-only operation: the directory and every project in
+     * it stay untouched. Returns whether a matching root was registered.
+     */
+    fun unregisterSharedProjectRoot(path: String): Boolean {
+        val raw = Paths.get(path).toAbsolutePath().normalize()
+        val canonical = runCatching { raw.toRealPath().toString() }.getOrNull()
+        val existing = readSharedRoots()
+        val next = existing.filterNot { it.path == raw.toString() || it.path == canonical }
+        if (next.size == existing.size) return false
+        writeSharedRoots(next)
+        return true
+    }
+
+    /**
+     * Resolve a user-supplied root to the real directory the engine will use. This is also the security gate
+     * for the feature: symlinked paths are resolved to their target, the filesystem root is refused, and the
+     * app's own home is refused so a shared root can never be used to expose or manipulate CodeAssist's private
+     * storage through this list.
+     */
+    private fun canonicalSharedRoot(path: String): Path {
+        require(path.isNotBlank()) { "Choose a folder to share" }
+        val supplied = Paths.get(path).toAbsolutePath().normalize()
+        require(Files.exists(supplied, LinkOption.NOFOLLOW_LINKS)) { "That folder does not exist" }
+        require(Files.isDirectory(supplied)) { "That path is not a folder" }
+        val real = runCatching { supplied.toRealPath() }.getOrElse {
+            throw IllegalArgumentException("That folder cannot be resolved to a real filesystem path", it)
+        }
+        require(Files.isDirectory(real)) { "That path is not a folder" }
+        require(Files.isReadable(real) && Files.isWritable(real)) {
+            "That folder cannot be read and written by CodeAssist"
+        }
+        require(isSafeSharedRoot(real)) {
+            "Choose a folder outside CodeAssist's app storage, and not a folder that contains it"
+        }
+        return real
+    }
+
+    /**
+     * The containment rule for shared roots, applied at registration AND when persisted roots are loaded
+     * (a directory can be replaced by a symlink after registration). It refuses the filesystem root, the app
+     * home itself, anything inside it, and any ancestor of it. Refusing ancestors matters: a root such as the
+     * whole public-storage volume would make its direct children (`Android`, `DCIM`, …) deletable/renamable.
+     */
+    private fun isSafeSharedRoot(real: Path): Boolean {
+        if (real.parent == null) return false
+        val appHome = runCatching { homeDir.toRealPath() }.getOrElse { homeDir.toAbsolutePath().normalize() }
+        return !real.startsWith(appHome) && !appHome.startsWith(real)
+    }
+
+    private fun isProjectsRoot(root: Path): Boolean {
+        val own = runCatching { projectsRoot.toRealPath() }.getOrElse { projectsRoot.toAbsolutePath().normalize() }
+        return root == own
+    }
+
+    private fun readSharedRoots(): List<SharedProjectRoot> {
+        val raw = preference(SHARED_ROOTS_KEY) ?: return emptyList()
+        val items = runCatching { Json.parse(raw) as? List<*> }.getOrNull() ?: return emptyList()
+        return items.mapNotNull { item ->
+            val map = item as? Map<*, *> ?: return@mapNotNull null
+            val path = (map["path"] as? String)?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val normalized = runCatching { Paths.get(path).toAbsolutePath().normalize().toString() }.getOrNull()
+                ?: return@mapNotNull null
+            SharedProjectRoot(
+                path = normalized,
+                treeUri = (map["treeUri"] as? String)?.takeIf { it.isNotBlank() },
+                label = (map["label"] as? String)?.takeIf { it.isNotBlank() },
+                addedAt = (map["addedAt"] as? Number)?.toLong() ?: 0L,
+            )
+        }.distinctBy { it.path }
+    }
+
+    private fun writeSharedRoots(roots: List<SharedProjectRoot>) {
+        val json = Json.write(
+            roots.map { root ->
+                linkedMapOf(
+                    "path" to root.path,
+                    "treeUri" to root.treeUri,
+                    "label" to root.label,
+                    "addedAt" to root.addedAt,
+                )
+            },
+        )
+        setPreference(SHARED_ROOTS_KEY, json)
+    }
+
+    /**
+     * Existing roots, plus the built-in projects root, with symlinks resolved for path comparisons. Shared
+     * roots are revalidated on every read: if the directory was replaced by a symlink to the app home (or an
+     * ancestor of it) after registration, it is ignored rather than turning every project operation against it.
+     */
+    private fun managedRoots(): List<Path> = buildList {
+        add(projectsRoot.toAbsolutePath().normalize())
+        addAll(sharedProjectRoots().map { Paths.get(it.path) })
+    }.mapIndexedNotNull { index, root ->
+        runCatching { root.toRealPath() }.getOrNull()?.takeIf { real ->
+            Files.isDirectory(real) && (index == 0 || isSafeSharedRoot(real))
+        }
+    }.distinct()
+
+    /**
+     * The managed root [dir] is a direct child of, or null. Used by every operation that must be confined to
+     * projects CodeAssist owns. A symlinked child is refused here; the list additionally skips symlinks so a
+     * link cannot smuggle a project outside its registered root into the picker.
+     */
+    private fun managedRootFor(dir: Path): Path? {
+        val absolute = dir.toAbsolutePath().normalize()
+        if (Files.isSymbolicLink(absolute)) return null
+        val real = runCatching { absolute.toRealPath() }.getOrNull()
+        val candidate = real ?: absolute
+        val parent = candidate.parent ?: return null
+        return managedRoots().firstOrNull { it == parent && candidate != it }
     }
 
     /** The host's restarter, or null on a host that cannot restart itself (desktop, tests). */
@@ -1182,6 +1370,7 @@ class ProjectManager private constructor(
         private const val PLATFORM_DIR = ".platform"
         private const val DISABLED_PLUGINS_KEY = "plugins.disabled"
         private const val CONSENTED_PLUGINS_KEY = "plugins.consented"
+        private const val SHARED_ROOTS_KEY = "project.sharedRoots"
 
         /** Desktop host: an installed Android SDK if present (so `android.*` resolves), else a detected JDK; Java 17. */
         fun desktop(

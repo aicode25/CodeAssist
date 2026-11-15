@@ -863,6 +863,20 @@ interface ProjectService {
      */
     suspend fun storageReport(): UiStorageReport? = null
 
+    /** Registered shared project roots, in registration order. Empty when the host supports none. */
+    fun sharedProjectRoots(): List<UiSharedProjectRoot> = emptyList()
+
+    /**
+     * Register [path] as a shared project root without moving or copying its contents. The path must be a real,
+     * readable/writable directory outside the app's private home. Returns the registered root, or null when the
+     * path was refused. [treeUri] is the SAF tree it was picked through, when there is one.
+     */
+    suspend fun registerSharedProjectRoot(path: String, treeUri: String? = null, label: String? = null): UiSharedProjectRoot? =
+        null
+
+    /** Forget the shared root at [path]. Never deletes the directory or its projects. */
+    suspend fun unregisterSharedProjectRoot(path: String): Boolean = false
+
     /**
      * Delete the regenerable storage the category [id] owns (see [UiStorageCategory.id]) — caches, or the
      * app-owned SDK/toolchain dirs. A no-op returning false for a read-only category (project source, other
@@ -1026,6 +1040,18 @@ data class UiStorageProject(
     val rootPath: String,
     val bytes: Long,
     val isAndroid: Boolean,
+)
+
+/**
+ * A directory the user registered as a shared project root. [available] is false when the directory is
+ * currently missing or unreadable; the entry is still shown so the user can remove it. Removing a root only
+ * forgets it and never deletes the directory or any project in it.
+ */
+data class UiSharedProjectRoot(
+    val path: String,
+    val treeUri: String?,
+    val label: String?,
+    val available: Boolean,
 )
 
 // ---------------------------------------------------------------------------

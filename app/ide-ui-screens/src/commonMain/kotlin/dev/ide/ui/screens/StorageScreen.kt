@@ -42,7 +42,9 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import dev.ide.ui.backend.FileActions
 import dev.ide.ui.backend.IdeBackend
+import dev.ide.ui.backend.UiSharedProjectRoot
 import dev.ide.ui.backend.UiStorageCategory
 import dev.ide.ui.backend.UiStorageProject
 import dev.ide.ui.backend.UiStorageReport
@@ -87,6 +89,16 @@ import dev.ide.ui.generated.resources.storage_clear_sdk_title
 import dev.ide.ui.generated.resources.storage_freed
 import dev.ide.ui.generated.resources.storage_open_badge
 import dev.ide.ui.generated.resources.storage_projects_header
+import dev.ide.ui.generated.resources.storage_shared_roots_add
+import dev.ide.ui.generated.resources.storage_shared_roots_body
+import dev.ide.ui.generated.resources.storage_shared_roots_empty
+import dev.ide.ui.generated.resources.storage_shared_roots_failed
+import dev.ide.ui.generated.resources.storage_shared_roots_grant_access
+import dev.ide.ui.generated.resources.storage_shared_roots_granted
+import dev.ide.ui.generated.resources.storage_shared_roots_not_granted
+import dev.ide.ui.generated.resources.storage_shared_roots_remove
+import dev.ide.ui.generated.resources.storage_shared_roots_title
+import dev.ide.ui.generated.resources.storage_shared_roots_unavailable
 import dev.ide.ui.generated.resources.storage_total_used
 import dev.ide.ui.generated.resources.storage_unavailable
 import dev.ide.ui.icons.CaIcons
@@ -109,6 +121,8 @@ fun StorageScreen(
     /** Whether the loaded project is open in the editor. Only then is its row marked Open and kept from deletion:
      *  a project closed behind Home stays loaded, and deleting it unloads it first. */
     projectOpen: Boolean = true,
+    /** Host bridge for the Android All-files grant and the real-folder picker. */
+    fileActions: FileActions = FileActions.None,
 ) {
     val state = rememberStorageScreenState(backend)
 
@@ -124,6 +138,21 @@ fun StorageScreen(
                 }
                 else -> StorageContent(
                     report = r,
+                    sharedRoots = state.sharedRoots,
+                    sharedBusy = state.sharedBusy,
+                    sharedRootFailed = state.sharedRootFailed,
+                    canManageAllFiles = fileActions.canManageAllFilesAccess,
+                    hasAllFilesAccess = fileActions.hasAllFilesAccess(),
+                    canAddSharedRoot = fileActions.canPickSharedRoot,
+                    onGrantAllFiles = { fileActions.openAllFilesAccessSettings() },
+                    onAddSharedRoot = {
+                        if (fileActions.canManageAllFilesAccess && !fileActions.hasAllFilesAccess()) {
+                            fileActions.openAllFilesAccessSettings()
+                        } else {
+                            fileActions.pickSharedRoot { picked -> picked?.let(state::addSharedRoot) }
+                        }
+                    },
+                    onRemoveSharedRoot = state::removeSharedRoot,
                     busy = state.busy,
                     onClear = state::clear,
                     onClearAllCaches = state::clearAllCaches,
@@ -180,6 +209,15 @@ fun StorageScreen(
 @Composable
 private fun StorageContent(
     report: UiStorageReport,
+    sharedRoots: List<UiSharedProjectRoot>,
+    sharedBusy: Boolean,
+    sharedRootFailed: Boolean,
+    canManageAllFiles: Boolean,
+    hasAllFilesAccess: Boolean,
+    canAddSharedRoot: Boolean,
+    onGrantAllFiles: () -> Unit,
+    onAddSharedRoot: () -> Unit,
+    onRemoveSharedRoot: (UiSharedProjectRoot) -> Unit,
     busy: Boolean,
     onClear: (UiStorageCategory) -> Unit,
     onClearAllCaches: () -> Unit,
@@ -195,6 +233,19 @@ private fun StorageContent(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item("total") { TotalCard(report) }
+        item("sharedRoots") {
+            SharedRootsCard(
+                roots = sharedRoots,
+                busy = sharedBusy,
+                failed = sharedRootFailed,
+                canManageAllFiles = canManageAllFiles,
+                hasAllFilesAccess = hasAllFilesAccess,
+                canAdd = canAddSharedRoot,
+                onGrantAllFiles = onGrantAllFiles,
+                onAdd = onAddSharedRoot,
+                onRemove = onRemoveSharedRoot,
+            )
+        }
         item("bar") { UsageBar(shown) }
         item("legend") {
             Column(
@@ -224,6 +275,108 @@ private fun StorageContent(
             itemsKeyed(report.projects, key = { it.rootPath }) { p ->
                 ProjectRow(p, isOpen = p.rootPath == openProjectRootPath, busy = busy) { onRequestDeleteProject(p) }
             }
+        }
+    }
+}
+
+/** Shared real-path roots: grant All-files access, pick a public folder, then remove entries without deleting data. */
+@Composable
+private fun SharedRootsCard(
+    roots: List<UiSharedProjectRoot>,
+    busy: Boolean,
+    failed: Boolean,
+    canManageAllFiles: Boolean,
+    hasAllFilesAccess: Boolean,
+    canAdd: Boolean,
+    onGrantAllFiles: () -> Unit,
+    onAdd: () -> Unit,
+    onRemove: (UiSharedProjectRoot) -> Unit,
+) {
+    Column(
+        Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface, RoundedCornerShape(Ca.radius.lg)).padding(18.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            stringResource(Res.string.storage_shared_roots_title),
+            color = MaterialTheme.colorScheme.onSurface,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            stringResource(Res.string.storage_shared_roots_body),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        if (canManageAllFiles) {
+            Text(
+                stringResource(
+                    if (hasAllFilesAccess) Res.string.storage_shared_roots_granted
+                    else Res.string.storage_shared_roots_not_granted,
+                ),
+                color = if (hasAllFilesAccess) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Medium,
+            )
+            if (!hasAllFilesAccess) {
+                WideButton(stringResource(Res.string.storage_shared_roots_grant_access), enabled = !busy, onClick = onGrantAllFiles)
+            }
+        }
+        if (canAdd) {
+            WideButton(stringResource(Res.string.storage_shared_roots_add), enabled = !busy, onClick = onAdd)
+        }
+        if (roots.isEmpty()) {
+            Text(
+                stringResource(Res.string.storage_shared_roots_empty),
+                color = MaterialTheme.colorScheme.outline,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        } else {
+            roots.forEach { root ->
+                Row(
+                    Modifier.fillMaxWidth().padding(top = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Icon(CaIcons.folder, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            root.label ?: root.path,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            root.path,
+                            color = MaterialTheme.colorScheme.outline,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (!root.available) {
+                            Text(
+                                stringResource(Res.string.storage_shared_roots_unavailable),
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.labelSmall,
+                            )
+                        }
+                    }
+                    ClearPill(
+                        stringResource(Res.string.storage_shared_roots_remove),
+                        destructive = false,
+                        enabled = !busy,
+                    ) { onRemove(root) }
+                }
+            }
+        }
+        if (failed) {
+            Text(
+                stringResource(Res.string.storage_shared_roots_failed),
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
     }
 }

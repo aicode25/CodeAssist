@@ -1,5 +1,12 @@
 package dev.ide.ui.backend
 
+/** A picked shared folder: its canonical real [path], the SAF [treeUri] it came from (Android), and a label. */
+data class SharedProjectRootSelection(
+    val path: String,
+    val treeUri: String? = null,
+    val label: String? = null,
+)
+
 /**
  * Platform file-system bridges the reusable UI can't express itself — picking files to import (Android
  * SAF / desktop `JFileChooser`) and sharing a file out (Android `FileProvider` chooser / desktop reveal).
@@ -51,6 +58,29 @@ interface FileActions {
 
     /** Whether this host can pick an existing directory (shows the "Import Gradle project" affordance). */
     val canPickDirectory: Boolean get() = false
+
+    /** Whether this host can grant the All-files access Android needs to read/write a real shared folder. */
+    val canManageAllFilesAccess: Boolean get() = false
+
+    /** Whether All-files access is currently granted. Always false on hosts that do not need it. */
+    fun hasAllFilesAccess(): Boolean = false
+
+    /**
+     * Open the system screen where the user grants All-files access to this app. On Android this is the
+     * app-specific "All files access" settings page, with fallbacks for ROMs that only expose the global list.
+     * Default no-op (the affordance is hidden when [canManageAllFilesAccess] is false).
+     */
+    fun openAllFilesAccessSettings() = Unit
+
+    /** Whether this host can pick a directory to register as a shared real-path project root. */
+    val canPickSharedRoot: Boolean get() = false
+
+    /**
+     * Pick a directory and return its real filesystem path, without copying it. Android maps the SAF tree to
+     * the public storage path and rejects providers that have no direct path (cloud providers, `Android/data`,
+     * `Android/obb`). Default no-op.
+     */
+    fun pickSharedRoot(onPicked: (SharedProjectRootSelection?) -> Unit) = onPicked(null)
 
     /**
      * Launch the platform folder picker for ONE existing directory and return its absolute filesystem path
