@@ -93,7 +93,7 @@ jobs:
         id: tag
         env:
           INPUT_TAG: ${{ inputs.tag }}
-          PUBLISH: ${{ github.event_name == 'push' || inputs.publish }}
+          PUBLISH: ${{ (github.event_name == 'push' && !contains(github.ref_name, '-dryrun')) || inputs.publish }}
         run: |
           set -euo pipefail
           if [ -n "${INPUT_TAG:-}" ]; then
@@ -117,7 +117,7 @@ jobs:
           echo "publish=${PUBLISH:-false}" >> "$GITHUB_OUTPUT"
 
       - name: Check the release does not already exist
-        if: ${{ github.event_name == 'push' || inputs.publish }}
+        if: ${{ (github.event_name == 'push' && !contains(github.ref_name, '-dryrun')) || inputs.publish }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -212,7 +212,7 @@ jobs:
           } > "$notes"
 
       - name: Publish GitHub Release
-        if: ${{ github.event_name == 'push' || inputs.publish }}
+        if: ${{ (github.event_name == 'push' && !contains(github.ref_name, '-dryrun')) || inputs.publish }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -226,6 +226,6 @@ jobs:
             --notes-file "$RUNNER_TEMP/release-notes.md"
 
       - name: Report dry run
-        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.publish }}
+        if: ${{ (github.event_name == 'workflow_dispatch' && !inputs.publish) || contains(github.ref_name, '-dryrun') }}
         run: |
           echo "Dry run complete. The APK is attached to this workflow run as an artifact; no tag or release was created." >> "$GITHUB_STEP_SUMMARY"
