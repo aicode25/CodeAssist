@@ -148,11 +148,11 @@ jobs:
           apk=$(find app/ide-android/build/outputs/apk/release -maxdepth 2 -name '*.apk' -type f | head -n1)
           if [ -z "$apk" ]; then echo "::error::No release APK was produced"; exit 1; fi
           tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n1)
-          # The APK must be the MAX identity so it installs beside the official com.tyron.code app, and its
-          # version must be the one this workflow is about to tag.
+          # The APK must carry the fork identity so it installs beside the official com.tyron.code app, and
+          # its version must be the one this workflow is about to tag.
           badging=$("$tools/aapt" dump badging "$apk")
-          echo "$badging" | grep -q "package: name='com.tyron.code.max'" || {
-            echo "::error::APK package is not com.tyron.code.max"; echo "$badging" | head -5; exit 1; }
+          echo "$badging" | grep -q "package: name='com.aicode25.codeassist'" || {
+            echo "::error::APK package is not com.aicode25.codeassist"; echo "$badging" | head -5; exit 1; }
           echo "$badging" | grep -q "versionCode='${{ steps.version.outputs.code }}'" || {
             echo "::error::APK versionCode does not match ${{ steps.version.outputs.code }}"; exit 1; }
           echo "$badging" | grep -q "versionName='${{ steps.version.outputs.name }}'" || {
@@ -202,12 +202,12 @@ jobs:
             echo
             echo "\`${{ steps.apk.outputs.path }}\`"
             echo
-            echo "- Package: \`com.tyron.code.max\` (installs beside the official \`com.tyron.code\` app)"
+            echo "- Package: \`com.aicode25.codeassist\` (installs beside the official \`com.tyron.code\` app)"
             echo "- Size: ${{ steps.apk.outputs.size }} bytes"
             echo "- SHA-256: \`${{ steps.apk.outputs.sha }}\`"
             echo "- Signer certificate SHA-256: \`${{ steps.apk.outputs.cert }}\`"
             echo
-            echo "Signed with the project's persistent MAX release key. Future MAX CodeAssist APKs signed with"
+            echo "Signed with the project's persistent release key. Future CodeAssist APKs signed with"
             echo "the same key update this install in place; the official \`com.tyron.code\` app is untouched."
           } > "$notes"
 

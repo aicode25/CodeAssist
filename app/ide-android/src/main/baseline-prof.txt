@@ -1,4 +1,4 @@
-# Baseline profile for the installed IDE app (com.tyron.code.max).
+# Baseline profile for the installed IDE app (com.aicode25.codeassist).
 #
 # AGP compiles this file into assets/dexopt/baseline.prof. At install time the package manager AOT-compiles
 # the matched methods (dex2oat) instead of interpreting and JIT-compiling them on first use. Play installs

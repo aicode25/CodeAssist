@@ -433,7 +433,7 @@ class OnDeviceBuildBenchmarkTest {
      * compiler + bundled Compose plugin). This is how a checked-out sample like android/compose-samples'
      * **Jetsnack** compiles on the device.
      *
-     *     adb push <checkout>/Jetsnack /sdcard/Android/data/com.tyron.code.max/files/jetsnack-src
+     *     adb push <checkout>/Jetsnack /sdcard/Android/data/com.aicode25.codeassist/files/jetsnack-src
      *     ./gradlew :ide-android:connectedDebugAndroidTest \
      *       -Pandroid.testInstrumentationRunnerArguments.class=dev.ide.android.bench.OnDeviceBuildBenchmarkTest#assembleImportedGradleProject
      *     adb logcat -s BuildBench

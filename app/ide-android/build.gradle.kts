@@ -564,16 +564,16 @@ android {
     compileSdkMinor = 1
 
     defaultConfig {
-        // MAX build identity: deliberately distinct from the official `com.tyron.code`, so this APK
+        // Fork build identity: deliberately distinct from the official `com.tyron.code`, so this APK
         // installs alongside an existing official CodeAssist. The Kotlin source package (namespace,
         // above) stays dev.ide.android — an internal build detail, independent of applicationId.
-        // Keep this value stable: changing it would make future MAX releases a separate app.
-        applicationId = "com.tyron.code.max"
+        // Keep this value stable: changing it makes future releases a separate app.
+        applicationId = "com.aicode25.codeassist"
         // The real engine (project-model-impl/lang-jdt/...) leans on java.nio.file (Path/Files/walk),
         // which is API 26+. Targeting 26 keeps it native and avoids core-library desugaring complexity.
         minSdk = 26
         targetSdk = 36
-        // versionCode must exceed the last published MAX release. 135 ships shared-storage + update work.
+        // versionCode must exceed the last published release. 135 ships shared-storage + update work.
         versionCode = 135
         versionName = "3.45.2"
         // connectedAndroidTest harness (the on-device Kotlin-compiler discovery spike).

@@ -4,6 +4,6 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- Reads the app's launch intent through the package manager (Android 11+ package visibility). -->
     <queries>
-        <package android:name="com.tyron.code.max" />
+        <package android:name="com.aicode25.codeassist" />
     </queries>
 </manifest>
