@@ -155,7 +155,17 @@ val bundledRuntimeModules: List<String> =
         .map { it.name.removeSuffix(".jmod") }
         .filter { it !in setOf("jcef", "jogl.all", "gluegen.rt") }
         .sorted()
-        .ifEmpty { error("no jmods in ${System.getProperty("java.home")}: package with a JDK that has them (the JBR SDK)") }
+
+// Android-only builds configure every project but package no desktop runtime, so a JDK without jmods must not
+// break them. Desktop packaging still needs the SDK's jmods, so fail there instead of shipping a partial runtime.
+val desktopPackagingRequested = gradle.startParameter.taskNames.any { task ->
+    task.substringAfterLast(':').let {
+        it.startsWith("package") || it.startsWith("createDistributable") || it.startsWith("runDistributable")
+    }
+}
+if (bundledRuntimeModules.isEmpty() && desktopPackagingRequested) {
+    error("no jmods in ${System.getProperty("java.home")}: package with a JDK that has them (the JBR SDK)")
+}
 
 compose.desktop {
     application {
@@ -168,7 +178,9 @@ compose.desktop {
             vendor = "CodeAssist"
             // The bundled runtime is also the JDK user projects compile and complete against, and kotlinc needs
             // java.management: a runtime trimmed to the modules the IDE itself links fails every Kotlin build.
-            modules(*bundledRuntimeModules.toTypedArray())
+            if (bundledRuntimeModules.isNotEmpty()) {
+                modules(*bundledRuntimeModules.toTypedArray())
+            }
             appResourcesRootDir.set(appResourcesRoot)
             macOS {
                 bundleID = "com.tyron.code.desktop"
