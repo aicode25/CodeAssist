@@ -2,6 +2,14 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
           xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- MAX build: direct access to user-picked public-storage folders (for example
+         /storage/emulated/0/Projects) so a terminal such as Termux and the IDE edit the exact same files.
+         This is the special All-files grant on API 30+, requested from Settings > Storage. It is included
+         in release too because GitHub Releases is this build's distribution channel, not Play. -->
+    <uses-permission
+            android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+            tools:ignore="ScopedStorage" />
+
     <!-- Maven dependency resolution downloads artifacts from Maven Central (the Dependencies screen). -->
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- "Download prebuilt libraries: Wi-Fi only" asks whether the connection is metered. Normal permission. -->

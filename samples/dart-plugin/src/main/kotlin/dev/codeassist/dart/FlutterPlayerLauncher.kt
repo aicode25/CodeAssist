@@ -63,6 +63,6 @@ class FlutterPlayerLauncher : Activity() {
         private const val TAG = "FlutterPlayerLauncher"
 
         /** The CodeAssist apps the player runs Flutter apps for. */
-        val TRUSTED_HOSTS = setOf("com.tyron.code")
+        val TRUSTED_HOSTS = setOf("com.tyron.code", "com.tyron.code.max")
     }
 }

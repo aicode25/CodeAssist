@@ -617,6 +617,17 @@ internal class FileBackend(private val ctx: BackendContext) : FileService {
         }
     }
 
+    override fun isWritable(path: String): Boolean = runCatching {
+        val p = Paths.get(path)
+        Files.isWritable(p) && (runCatching { Files.isWritable(p.parent) }.getOrDefault(true))
+    }.getOrDefault(false)
+
+    override fun refreshFromDisk() {
+        ctx.bumpFileSystemEpoch()
+    }
+
+    override fun workspaceRootPath(): String? = ctx.servicesOrNull?.workspaceRoot?.toString()
+
     override fun readFile(path: String): String = runCatching {
         val p = Paths.get(path)
         val size = Files.size(p)

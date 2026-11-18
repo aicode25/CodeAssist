@@ -1124,8 +1124,11 @@ class IdeUiState(
         val text = withContext(ioDispatcher) { backend.files.readFile(path) }
         // A second tap on the same row may have opened it while we were reading — focus it, don't duplicate.
         if (focusOpenTab(path)) return
+        // A file the device will refuse to write (a revoked shared-storage grant, a read-only SD card) opens
+        // read-only, rather than accepting edits that could never be saved.
+        val writable = withContext(ioDispatcher) { backend.files.isWritable(path) }
         backend.editor.documentLoaded(path, text)
-        openFiles.add(OpenFile(path, name, text))
+        openFiles.add(OpenFile(path, name, text, readOnly = !writable))
         activeIndex = openFiles.lastIndex
         backend.editor.onFileOpened(path) // a genuinely new tab (focus path returned above), for plugin events
     }

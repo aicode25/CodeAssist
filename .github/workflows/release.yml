@@ -1,0 +1,231 @@
+name: Release
+
+# Professional, opt-in APK releases:
+#   * pushing a `v*` tag publishes that tag;
+#   * a manual run builds an APK and publishes only when `publish` is checked.
+# A manual run with `publish=false` is a safe dry run: it uploads the same APK as a workflow artifact but
+# creates no tag and no release. A failed build can never reach the Releases page because the publish step
+# runs only after the build and APK/signature checks succeed.
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (blank = v<versionName>-<versionCode> from the build)"
+        required: false
+        type: string
+      publish:
+        description: "Publish a GitHub Release (leave off for a dry-run build)"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+# The only scope this workflow needs. Checkout, Gradle and the artifact upload are read-only.
+permissions:
+  contents: write
+
+env:
+  JAVA_VERSION: "25"
+
+jobs:
+  release:
+    name: Build and publish signed APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history: the changelog is built from the previous release tag
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-36 platforms;android-36.1 build-tools;36.0.0"
+
+      # Signing is an external credential and is never committed. A fork that has not configured the four
+      # secrets fails here, before any build, with an instruction instead of publishing an unsigned APK.
+      - name: Configure release signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_BASE64:-}" ] || [ -z "${STORE_PASSWORD:-}" ] || [ -z "${KEY_ALIAS:-}" ] || [ -z "${KEY_PASSWORD:-}" ]; then
+            echo "::error::Release signing is not configured. Add RELEASE_KEYSTORE_BASE64 (base64 of the .jks), RELEASE_STORE_PASSWORD, RELEASE_KEY_ALIAS and RELEASE_KEY_PASSWORD as repository secrets. No APK was published."
+            exit 1
+          fi
+          mkdir -p keystore
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > keystore/codeassist-upload.jks
+          {
+            echo "storeFile=keystore/codeassist-upload.jks"
+            echo "storePassword=$STORE_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "keyPassword=$KEY_PASSWORD"
+          } > keystore.properties
+          chmod 600 keystore.properties keystore/codeassist-upload.jks
+
+      - name: Read app version
+        id: version
+        run: |
+          set -euo pipefail
+          file=app/ide-android/build.gradle.kts
+          name=$(grep -m1 'versionName = ' "$file" | sed -E 's/.*versionName = "([^"]+)".*/\1/')
+          code=$(grep -m1 'versionCode = ' "$file" | sed -E 's/.*versionCode = ([0-9]+).*/\1/')
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve release tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          PUBLISH: ${{ github.event_name == 'push' || inputs.publish }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_TAG:-}" ]; then
+            tag="$INPUT_TAG"
+          elif [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="v${{ steps.version.outputs.name }}-${{ steps.version.outputs.code }}"
+          fi
+          case "$tag" in v*) ;; *) tag="v$tag" ;; esac
+          # A dry run creates neither a tag nor a release, so it may reuse an existing tag name.
+          if [ "${PUBLISH:-false}" = "true" ]; then
+            if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+              if [ "${GITHUB_EVENT_NAME}" != "push" ] || [ "${GITHUB_REF_NAME}" != "$tag" ]; then
+                echo "::error::Tag $tag already exists. Push a new version or pass a unique tag; nothing was published."
+                exit 1
+              fi
+            fi
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "publish=${PUBLISH:-false}" >> "$GITHUB_OUTPUT"
+
+      - name: Check the release does not already exist
+        if: ${{ github.event_name == 'push' || inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag='${{ steps.tag.outputs.tag }}'
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "::error::Release $tag already exists. Refusing to create a duplicate; nothing was published."
+            exit 1
+          fi
+
+      - name: Disable Kotlin incremental compilation (CI)
+        run: |
+          mkdir -p ~/.gradle
+          echo "kotlin.incremental=false" >> ~/.gradle/gradle.properties
+
+      # Required check: the shared-storage project-root contract (listing + in-place adoption) must pass
+      # before any APK is built or released. This also compiles :ide-core and its dependency graph.
+      - name: Run required unit tests
+        run: ./gradlew :ide-core:test --tests "dev.ide.core.SharedProjectRootTest" --console=plain --stacktrace
+
+      - name: Build release APK
+        run: ./gradlew :ide-android:assembleRelease --console=plain --stacktrace
+
+      - name: Verify APK, identity and signature
+        id: apk
+        run: |
+          set -euo pipefail
+          apk=$(find app/ide-android/build/outputs/apk/release -maxdepth 2 -name '*.apk' -type f | head -n1)
+          if [ -z "$apk" ]; then echo "::error::No release APK was produced"; exit 1; fi
+          tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n1)
+          # The APK must be the MAX identity so it installs beside the official com.tyron.code app, and its
+          # version must be the one this workflow is about to tag.
+          badging=$("$tools/aapt" dump badging "$apk")
+          echo "$badging" | grep -q "package: name='com.tyron.code.max'" || {
+            echo "::error::APK package is not com.tyron.code.max"; echo "$badging" | head -5; exit 1; }
+          echo "$badging" | grep -q "versionCode='${{ steps.version.outputs.code }}'" || {
+            echo "::error::APK versionCode does not match ${{ steps.version.outputs.code }}"; exit 1; }
+          echo "$badging" | grep -q "versionName='${{ steps.version.outputs.name }}'" || {
+            echo "::error::APK versionName does not match ${{ steps.version.outputs.name }}"; exit 1; }
+          "$tools/apksigner" verify --verbose "$apk" >/dev/null
+          certs=$("$tools/apksigner" verify --print-certs "$apk")
+          cert=$(printf '%s\n' "$certs" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n1)
+          if [ -z "$cert" ]; then echo "::error::APK signer certificate could not be read"; exit 1; fi
+          out="CodeAssist-MAX-${{ steps.version.outputs.name }}-${{ steps.version.outputs.code }}.apk"
+          cp "$apk" "$out"
+          sha=$(sha256sum "$out" | cut -d' ' -f1)
+          size=$(stat -c%s "$out")
+          echo "path=$out" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "cert=$cert" >> "$GITHUB_OUTPUT"
+          echo "size=$size" >> "$GITHUB_OUTPUT"
+          printf 'APK: `%s`\nSHA-256: `%s`\nSigner certificate SHA-256: `%s`\n' "$out" "$sha" "$cert" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload release APK as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeassist-release-apk-${{ steps.version.outputs.code }}
+          path: ${{ steps.apk.outputs.path }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Write changelog
+        run: |
+          set -euo pipefail
+          notes="$RUNNER_TEMP/release-notes.md"
+          {
+            echo "## CodeAssist MAX ${{ steps.version.outputs.name }} (versionCode ${{ steps.version.outputs.code }})"
+            echo
+            echo "Built from \`${GITHUB_SHA}\` on $(date -u +'%Y-%m-%d %H:%M UTC')."
+            echo
+            prev=$(git describe --tags --abbrev=0 'HEAD^' 2>/dev/null || true)
+            if [ -n "$prev" ]; then
+              echo "### Changes since $prev"
+              git log --pretty=format:'- %s (%h)' "$prev..HEAD" | head -n 60
+            else
+              echo "### Commits"
+              git log --pretty=format:'- %s (%h)' -n 30 HEAD
+            fi
+            echo
+            echo
+            echo "### APK"
+            echo
+            echo "\`${{ steps.apk.outputs.path }}\`"
+            echo
+            echo "- Package: \`com.tyron.code.max\` (installs beside the official \`com.tyron.code\` app)"
+            echo "- Size: ${{ steps.apk.outputs.size }} bytes"
+            echo "- SHA-256: \`${{ steps.apk.outputs.sha }}\`"
+            echo "- Signer certificate SHA-256: \`${{ steps.apk.outputs.cert }}\`"
+            echo
+            echo "Signed with the project's persistent MAX release key. Future MAX CodeAssist APKs signed with"
+            echo "the same key update this install in place; the official \`com.tyron.code\` app is untouched."
+          } > "$notes"
+
+      - name: Publish GitHub Release
+        if: ${{ github.event_name == 'push' || inputs.publish }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag='${{ steps.tag.outputs.tag }}'
+          title="CodeAssist MAX ${{ steps.version.outputs.name }} (${{ steps.version.outputs.code }})"
+          gh release create "$tag" "${{ steps.apk.outputs.path }}" \
+            --repo "${{ github.repository }}" \
+            --target "$GITHUB_SHA" \
+            --title "$title" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"
+
+      - name: Report dry run
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.publish }}
+        run: |
+          echo "Dry run complete. The APK is attached to this workflow run as an artifact; no tag or release was created." >> "$GITHUB_STEP_SUMMARY"

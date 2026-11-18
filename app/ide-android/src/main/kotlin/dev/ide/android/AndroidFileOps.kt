@@ -247,9 +247,8 @@ internal class AndroidFileOps(private val activity: ComponentActivity) {
     }.getOrElse { Toast.makeText(activity, "No app to open links", Toast.LENGTH_SHORT).show() }
 
     /**
-     * Whether this build declares the All-files permission. It is debug/profile-only (see the flavor
-     * manifests), so release builds report false and the UI hides the shared-folder controls instead of
-     * sending the user to a settings page that cannot grant anything.
+     * Whether this build declares the All-files permission. The MAX release declares it (see the main
+     * manifest), so the shared-folder controls are reachable from Settings > Storage.
      */
     fun canManageAllFilesAccess(): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false

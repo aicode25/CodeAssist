@@ -564,16 +564,18 @@ android {
     compileSdkMinor = 1
 
     defaultConfig {
-        // The Play Store identity (immutable once published). The Kotlin source package (namespace,
-        // above) stays dev.ide.android — that's an internal build detail, independent of applicationId.
-        applicationId = "com.tyron.code"
+        // MAX build identity: deliberately distinct from the official `com.tyron.code`, so this APK
+        // installs alongside an existing official CodeAssist. The Kotlin source package (namespace,
+        // above) stays dev.ide.android — an internal build detail, independent of applicationId.
+        // Keep this value stable: changing it would make future MAX releases a separate app.
+        applicationId = "com.tyron.code.max"
         // The real engine (project-model-impl/lang-jdt/...) leans on java.nio.file (Path/Files/walk),
         // which is API 26+. Targeting 26 keeps it native and avoids core-library desugaring complexity.
         minSdk = 26
         targetSdk = 36
-        // versionCode must exceed the last published release (the previous-codebase app reached ~29).
-        versionCode = 133
-        versionName = "3.45.0"
+        // versionCode must exceed the last published MAX release. 135 ships shared-storage + update work.
+        versionCode = 135
+        versionName = "3.45.2"
         // connectedAndroidTest harness (the on-device Kotlin-compiler discovery spike).
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -1237,6 +1239,8 @@ dependencies {
     // FileProvider (androidx.core.content.FileProvider) — hands other apps content:// URIs to our
     // app-private project files for Share / "Open with", and grants read access on inbound intents.
     implementation(libs.androidx.core)
+    // lifecycleScope for MainActivity's external-project watcher (androidx.lifecycle.lifecycleScope).
+    implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.kotlinx.coroutines.core)
 
     // The on-device Kotlin interpreter (:interp-core) + its Compose bridge/render surface (:interp-compose,

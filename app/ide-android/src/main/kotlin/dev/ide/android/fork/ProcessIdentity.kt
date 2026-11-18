@@ -17,7 +17,7 @@ internal object ProcessIdentity {
 
     private const val BUILD_SUFFIX = ":build"
 
-    /** The current process name (`com.tyron.code`, `com.tyron.code:build`, ...), or null if unreadable. */
+    /** The current process name (`com.tyron.code.max`, `com.tyron.code.max:build`, ...), or null if unreadable. */
     val processName: String? by lazy {
         runCatching {
             // argv[0]: the kernel NUL-delimits the arguments and may NUL-pad the rest of the buffer.

@@ -155,4 +155,40 @@ class SharedProjectRootTest {
             assertNotNull(roots.single().path)
         }
     }
+
+    @Test
+    fun listsAndAdoptsAnExistingToolProjectInPlace() = withTempDir("shared-home") { home ->
+        withTempDir("shared-data") { base ->
+            val shared = base.resolve("shared").also { Files.createDirectories(it) }
+            val project = shared.resolve("TermuxApp").also { Files.createDirectories(it.resolve("app/src/main")) }
+            Files.writeString(project.resolve("settings.gradle"), "include ':app'\n")
+            Files.writeString(project.resolve("build.gradle"), "// root build\n")
+            val source = project.resolve("app/src/main/Main.kt")
+            Files.writeString(source, "fun main() = Unit\n")
+            // A random directory is not offered as a project just because it sits under a shared root.
+            Files.createDirectories(shared.resolve("downloads-cache"))
+
+            val manager = ProjectManager.desktop(home.resolve("projects"))
+            manager.registerSharedProjectRoot(shared.toString())
+
+            val listed = manager.list()
+            assertEquals(1, listed.size, "only the project-looking folder is listed: $listed")
+            val summary = listed.single()
+            assertEquals("TermuxApp", summary.name)
+            assertEquals(project.toRealPath().toString(), summary.rootPath)
+            assertTrue(summary.unrecognized, "it has not been opened yet")
+            assertTrue(summary.compatibility, "its Gradle build files are recognized")
+
+            manager.open(summary.rootPath).use { ide ->
+                assertEquals("TermuxApp", ide.projectDisplayName())
+            }
+
+            assertEquals("fun main() = Unit\n", Files.readString(source), "the existing source is untouched")
+            assertTrue(Files.isDirectory(project.resolve(".platform")), "the model is written beside the project")
+            assertFalse(
+                Files.exists(home.resolve("projects").resolve("TermuxApp")),
+                "opening in place must not copy the project into CodeAssist's own storage",
+            )
+        }
+    }
 }

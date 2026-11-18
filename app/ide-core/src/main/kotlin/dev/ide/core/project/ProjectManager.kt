@@ -383,22 +383,38 @@ class ProjectManager private constructor(
         val prefs = cachedPrefs()
         val seen = HashSet<String>()
         val projects = ArrayList<ProjectSummary>()
-        for (root in managedRoots()) {
+        managedRoots().forEachIndexed { rootIndex, root ->
+            // Index 0 is CodeAssist's own projects directory; every later root is a user-registered shared
+            // folder. Only those may surface a folder that has no model yet: the picker has to show the
+            // project directories a terminal already put there, and opening one adopts it in place (see [open]).
+            val shared = rootIndex > 0
             // An unreadable root reads as "no projects", not as a crash. This runs on every render of the
             // home screen, so a throw here (AccessDeniedException, seen in the field) escapes through
             // ProjectBackend.projects into composition and takes the app down before it can draw anything --
             // leaving no way back in. An empty picker is recoverable; a boot loop is not.
             val dirs = runCatching { Files.newDirectoryStream(root).use { it.toList() } }
                 .onFailure { log.warn("project list: $root could not be read", it) }
-                .getOrNull() ?: continue
+                .getOrNull() ?: return@forEachIndexed
             for (raw in dirs) {
                 if (Files.isSymbolicLink(raw)) continue
                 val dir = runCatching { raw.toRealPath() }.getOrNull() ?: continue
                 if (dir.parent != root || !seen.add(dir.toString())) continue
-                if (!runCatching {
-                        Files.isDirectory(dir) && ModelPersistence.exists(dir.toString())
-                    }.getOrDefault(false)
-                ) {
+                if (!runCatching { Files.isDirectory(dir) }.getOrDefault(false)) continue
+                val hasModel = runCatching { ModelPersistence.exists(dir.toString()) }.getOrDefault(false)
+                if (!hasModel) {
+                    // A shared folder may hold projects CodeAssist has never opened. List the ones that look
+                    // like project roots, named by their directory, so they can be opened in place. Anything
+                    // else (a cache, a download directory, `.git`) is left out rather than offered as a project.
+                    if (!shared || !looksLikeProjectRoot(dir)) continue
+                    projects += ProjectSummary(
+                        name = dir.fileName?.toString().orEmpty(),
+                        rootPath = dir.toString(),
+                        moduleCount = 0,
+                        compatibility = hasGradleBuildFiles(dir),
+                        isAndroid = hasAndroidManifest(dir),
+                        lastOpened = prefs.getProperty(openedKey(dir))?.toLongOrNull() ?: 0L,
+                        unrecognized = true,
+                    )
                     continue
                 }
                 val proj = runCatching { ModelPersistence.load(dir.toString()) }.getOrNull()
@@ -455,10 +471,55 @@ class ProjectManager private constructor(
 
     fun open(rootPath: String, buildOnly: Boolean = false): IdeServices {
         applyMemoryMode()
-        return IdeServices.openAt(Paths.get(rootPath), sdk(), sharedCachesRoot = homeDir, env = env, buildOnly = buildOnly)
+        val dir = Paths.get(rootPath).toAbsolutePath().normalize()
+        // A project in a shared folder may never have been opened by CodeAssist. Adopt it IN PLACE so the
+        // terminal and the IDE keep editing the same files; the model is added beside them (`.platform/`),
+        // never by copying the project elsewhere. [adoptFolderInPlace] also enforces that the directory is a
+        // direct child of a registered root, so a stray path can't be turned into a workspace.
+        if (!runCatching { ModelPersistence.exists(dir.toString()) }.getOrDefault(false)) {
+            adoptFolderInPlace(dir, origin = dir.toString())
+        }
+        return IdeServices.openAt(dir, sdk(), sharedCachesRoot = homeDir, env = env, buildOnly = buildOnly)
             // A build-only daemon open isn't a user "access" — don't let a background build reorder the picker.
-            .also { if (!buildOnly) recordOpened(Paths.get(rootPath)) }
+            .also { if (!buildOnly) recordOpened(dir) }
     }
+
+    /**
+     * Whether [dir] looks like a project root a user would open: a build script, a VCS checkout, a CodeAssist
+     * workspace, or an Android manifest. Used only to decide what a shared root offers in the picker; opening
+     * still validates and adopts through the normal path.
+     */
+    private fun looksLikeProjectRoot(dir: Path): Boolean = runCatching {
+        val names = Files.list(dir).use { s -> s.map { it.fileName.toString() }.collect(Collectors.toSet()) }
+        // A `.platform` directory with no readable model is a damaged CodeAssist project; offer it rather than
+        // hide the user's files, so opening can try to recover/adopt it.
+        PLATFORM_DIR in names || hasProjectMarker(names)
+    }.getOrDefault(false)
+
+    private fun hasProjectMarker(names: Set<String>): Boolean =
+        names.any {
+            it == "settings.gradle" || it == "settings.gradle.kts" ||
+                it == "build.gradle" || it == "build.gradle.kts" ||
+                it == "pom.xml" || it == "gradlew" || it == "gradlew.bat" ||
+                it == "package.json" || it == "go.mod" || it == "Cargo.toml" ||
+                it == "module.toml" || it == "AndroidManifest.xml" || it == ".git"
+        }
+
+    private fun hasGradleBuildFiles(dir: Path): Boolean = runCatching {
+        Files.list(dir).use { s ->
+            s.anyMatch {
+                val n = it.fileName.toString()
+                n == "settings.gradle" || n == "settings.gradle.kts" || n == "build.gradle" || n == "build.gradle.kts"
+            }
+        }
+    }.getOrDefault(false)
+
+    private fun hasAndroidManifest(dir: Path): Boolean =
+        runCatching {
+            Files.exists(dir.resolve("AndroidManifest.xml")) ||
+                Files.exists(dir.resolve("app/AndroidManifest.xml")) ||
+                Files.exists(dir.resolve("src/main/AndroidManifest.xml"))
+        }.getOrDefault(false)
 
     // --- learning scratch projects (hidden; used to compile + run Learn exercises) ---
 

@@ -7,4 +7,7 @@
     <files-path name="codeassist" path="codeassist/" />
     <!-- Where the camera writes a photo taken for the AI chat (see AndroidFileOps.newCameraTarget). -->
     <cache-path name="camera" path="camera/" />
+    <!-- The APK an in-app update downloads before handing it to the system installer. -->
+    <cache-path name="updates" path="updates/" />
+    <external-cache-path name="updates-ext" path="updates/" />
 </paths>

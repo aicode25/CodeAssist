@@ -21,6 +21,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.lifecycleScope
 import dev.ide.core.project.CaprojFormat
 import dev.ide.core.IdeServicesBackend
 import dev.ide.ui.CodeAssistApp
@@ -61,6 +62,15 @@ open class MainActivity : ComponentActivity() {
     /** Android file/SAF/FileProvider plumbing (byte-level import / share / export / install / reveal). */
     private val fileOps by lazy { AndroidFileOps(this) }
 
+    /** Sees files changed by a terminal (Termux) or a file manager and refreshes the open project's tree. */
+    private val externalChanges by lazy {
+        ExternalProjectWatcher(
+            scope = lifecycleScope,
+            workspaceRoot = { session?.backend?.files?.workspaceRootPath() },
+            onChanged = { session?.backend?.files?.refreshFromDisk() },
+        )
+    }
+
     /** UMP consent flow (gathers ad consent before AdMob init; drives the "Manage ad consent" Settings entry). */
     private val adConsent by lazy { AdConsentManager(this) }
 
@@ -95,6 +105,10 @@ open class MainActivity : ComponentActivity() {
      *  by "Open with" goes into that project, and waits while there is none. */
     private val projectOpen = mutableStateOf(false)
 
+    /** A release the user tapped in an update notification, waiting for the activity to be in front. */
+    private var pendingUpdate: AppUpdate.Release? = null
+    private var updatePromptShown = false
+
     /** Whether the UMP consent flow has settled (success or failure). Ads wait for it, see [ADS_STARTUP_DELAY_MS]. */
     private val adConsentResolved = mutableStateOf(false)
 
@@ -112,7 +126,9 @@ open class MainActivity : ComponentActivity() {
         AppIcons.host = AndroidAppIcons(applicationContext)
         // Before extractStream: a sign-in redirect is an ACTION_VIEW with a URI, which would otherwise be
         // taken for a file to import.
-        if (!takeAuthRedirect(intent) && !takeStoreLink(intent) && !takeAgentReturn(intent) && !takeNotificationTap(intent)) {
+        if (!takeAuthRedirect(intent) && !takeStoreLink(intent) && !takeAgentReturn(intent) &&
+            !takeNotificationTap(intent) && !takeUpdateTap(intent)
+        ) {
             inbound.value = extractStream(intent)
         }
         // Gather UMP consent BEFORE initializing the Ads SDK (mediation + EEA/UK requirement). Failure resolves
@@ -134,6 +150,13 @@ open class MainActivity : ComponentActivity() {
                     AndroidFrameMetrics.register(this@MainActivity, s.backend)
                     // A redirect that landed mid-bootstrap now has somewhere to go.
                     deliverAuthRedirect()
+                    // One cheap GitHub release check per 12h, off the main thread. It notifies when the
+                    // notification permission is available, and otherwise falls back to the in-app prompt.
+                    AppUpdate.checkAndNotify(this@MainActivity) { release ->
+                        pendingUpdate = release
+                        updatePromptShown = false
+                        maybeShowPendingUpdate()
+                    }
                 }.onFailure { e -> error = e.stackTraceToString() }
             }
 
@@ -475,6 +498,20 @@ open class MainActivity : ComponentActivity() {
         data.addAll(AppKeyboardShortcuts.groups())
     }
 
+    override fun onResume() {
+        super.onResume()
+        // A save made by Termux while CodeAssist was in the background raises no Android event; re-read the
+        // open project once on return, then watch it while it stays in front.
+        session?.backend?.files?.refreshFromDisk()
+        externalChanges.start()
+        maybeShowPendingUpdate()
+    }
+
+    override fun onPause() {
+        externalChanges.stop()
+        super.onPause()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -482,6 +519,7 @@ open class MainActivity : ComponentActivity() {
         if (takeStoreLink(intent)) return
         if (takeAgentReturn(intent)) return
         if (takeNotificationTap(intent)) return
+        if (takeUpdateTap(intent)) return
         extractStream(intent)?.let { inbound.value = it }
     }
 
@@ -500,6 +538,25 @@ open class MainActivity : ComponentActivity() {
         storeLink.value = dev.ide.store.StoreLink.itemId(url) ?: ""
         intent.data = null
         return true
+    }
+
+    /**
+     * A tap on the "update available" notification carries the release in extras. It must be consumed before
+     * [extractStream], which would otherwise treat the intent as an ordinary launch with no file to import.
+     */
+    private fun takeUpdateTap(intent: Intent?): Boolean {
+        val release = AppUpdate.fromIntent(intent) ?: return false
+        pendingUpdate = release
+        updatePromptShown = false
+        return true
+    }
+
+    /** Show the pending update prompt once the activity is actually in front (a dialog cannot come first). */
+    private fun maybeShowPendingUpdate() {
+        val release = pendingUpdate ?: return
+        if (updatePromptShown) return
+        updatePromptShown = true
+        AppUpdate.prompt(this, release)
     }
 
     /** Claim [intent] if a tray notification was tapped: its target is opened once the UI can act on it. */

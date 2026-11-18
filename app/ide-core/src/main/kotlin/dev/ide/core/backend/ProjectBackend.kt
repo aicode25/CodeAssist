@@ -134,10 +134,11 @@ internal class ProjectBackend(
         return withContext(Dispatchers.IO) {
             runCatching {
                 if (Paths.get(rootPath) == ctx.servicesOrNull?.workspaceRoot) return@runCatching true
-                // A folder with no project in it opens as an empty one, which is never what the caller meant:
-                // the store's Open on a project deleted since, or a remembered path that is gone.
-                if (!ModelPersistence.exists(rootPath)) {
-                    log.warn("Not opening $rootPath: there is no project in it")
+                // The folder must still exist. A shared-storage project may not have a CodeAssist model yet:
+                // [ProjectManager.open] adopts it in place, which is how a folder created in Termux opens here
+                // without being copied. A remembered path that is gone is still a false result.
+                if (!Files.isDirectory(Paths.get(rootPath))) {
+                    log.warn("Not opening $rootPath: the folder is gone")
                     return@runCatching false
                 }
                 ctx.swapEngine(mgr.open(rootPath)); true

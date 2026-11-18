@@ -17,7 +17,7 @@ import org.junit.rules.TestWatcher
 import org.junit.runner.Description
 
 /**
- * Base for the black-box feature tests. Drives the installed app (`com.tyron.code`, the `profile` variant)
+ * Base for the black-box feature tests. Drives the installed app (`com.tyron.code.max`, the `profile` variant)
  * through UI Automator only, from this test APK's own process.
  *
  * Two oracles per test:
@@ -470,7 +470,7 @@ abstract class E2eTest {
     fun uniqueName(prefix: String) = prefix + (System.currentTimeMillis() / 1000 % 100_000)
 
     companion object {
-        const val APP = "com.tyron.code"
+        const val APP = "com.tyron.code.max"
         const val ISOLATES = "[\\u2066-\\u2069\\u200B-\\u200F\\u202A-\\u202E\\uFEFF\\s]*"
         /** Bidi isolates/marks, zero-width characters and BOM: invisible, but they break exact text matches. */
         val INVISIBLE = Regex("[\\u2066-\\u2069\\u200B-\\u200F\\u202A-\\u202E\\uFEFF]")

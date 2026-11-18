@@ -123,8 +123,10 @@ fun StorageScreen(
     projectOpen: Boolean = true,
     /** Host bridge for the Android All-files grant and the real-folder picker. */
     fileActions: FileActions = FileActions.None,
+    /** Called after a shared root is registered or removed, so the project picker re-reads its folders. */
+    onSharedRootsChanged: () -> Unit = {},
 ) {
-    val state = rememberStorageScreenState(backend)
+    val state = rememberStorageScreenState(backend, onSharedRootsChanged = onSharedRootsChanged)
 
     ExpressiveScaffold(title = stringResource(Res.string.settings_storage), onBack = onBack) { innerPadding ->
         Box(Modifier.fillMaxSize().padding(innerPadding)) {

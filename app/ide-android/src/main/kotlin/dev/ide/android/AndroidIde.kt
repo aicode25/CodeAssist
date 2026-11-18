@@ -494,8 +494,8 @@ object AndroidIde {
                 managerRef.get()?.preference(separateProcessKey)?.trim() != "false"
             },
         )
-        // Project data left by previous app versions (same `com.tyron.code` package, so the same external
-        // files dir survives a Play update). Swept into backups, and recovered into the picker by
+        // Project data left by previous versions of THIS package (the MAX build uses `com.tyron.code.max`, so
+        // its external files dir is separate from the official `com.tyron.code` app). Swept into backups, and recovered into the picker by
         // `importLegacyProjects` when in a loadable format. Two known locations:
         //  - `<external-files>/Projects` — the v0.2.9 (legacy, Gradle) projects dir (`getExternalFilesDir("Projects")`).
         //  - `filesDir/codeassist` — an early internal-storage home of THIS app, before the move to external.

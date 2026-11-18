@@ -644,6 +644,7 @@ private fun AppRoute(
             projectOpen = app.projectOpen,
             onBack = { app.navigateTo(Screen.Hub) },
             fileActions = fileActions,
+            onSharedRootsChanged = app::refreshProjects,
         )
 
         Screen.CodeStyle -> CodeStyleScreen(

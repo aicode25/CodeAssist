@@ -4,14 +4,8 @@
      shipped in release. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
           xmlns:tools="http://schemas.android.com/tools">
-    <!-- Shared project folders: direct real-path access to a user-picked public directory (for example
-         /storage/emulated/0/Projects) that a terminal such as Termux can also read and write. This is a
-         user-granted special permission on API 30+; the Storage screen links to the system grant page.
-         Restricted on Play for most apps, so it is debug/profile-only: the release manifest never declares
-         it and Play keeps its existing compatibility. -->
-    <uses-permission
-        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
-        tools:ignore="ScopedStorage" />
+    <!-- Shared-project access (MANAGE_EXTERNAL_STORAGE) is declared once in the main manifest, so the
+         debug variant inherits the same storage behavior as release. -->
 
     <application>
         <activity

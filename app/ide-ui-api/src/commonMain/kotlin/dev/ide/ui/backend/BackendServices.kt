@@ -32,6 +32,23 @@ interface FileService {
     /** Read a file's current on-disk text. */
     fun readFile(path: String): String
 
+    /**
+     * Whether [path] can actually be written by this process. The editor opens a file read-only when it
+     * cannot, so a shared-storage project whose grant was revoked (or an SD card that went read-only) is
+     * never presented as editable when a save would only fail.
+     */
+    fun isWritable(path: String): Boolean = true
+
+    /**
+     * Re-read the tree after files changed outside the IDE (a terminal such as Termux, a file manager, or a
+     * git checkout). Bumps [fileSystemEpoch] so the UI rebuilds the tree and re-syncs clean open tabs.
+     */
+    fun refreshFromDisk() {}
+
+    /** The open project's root directory, for a host watcher that polls it for external changes; null when
+     *  no project is open. */
+    fun workspaceRootPath(): String? = null
+
     /** Name of the module owning [path], or null if outside the project. */
     fun moduleNameForFile(path: String): String?
 

@@ -25,6 +25,7 @@ import kotlinx.coroutines.launch
 internal class StorageScreenState(
     private val backend: IdeBackend,
     private val scope: CoroutineScope,
+    private val onSharedRootsChanged: () -> Unit = {},
 ) {
     var report: UiStorageReport? by mutableStateOf(null)
         private set
@@ -80,6 +81,7 @@ internal class StorageScreenState(
                 selection.label,
             )
             sharedRootFailed = registered == null
+            if (registered != null) onSharedRootsChanged()
             reloadNow()
             sharedBusy = false
         }
@@ -91,6 +93,7 @@ internal class StorageScreenState(
         scope.launch {
             sharedBusy = true
             sharedRootFailed = !backend.projects.unregisterSharedProjectRoot(root.path)
+            if (!sharedRootFailed) onSharedRootsChanged()
             reloadNow()
             sharedBusy = false
         }
@@ -160,4 +163,7 @@ internal class StorageScreenState(
 internal fun rememberStorageScreenState(
     backend: IdeBackend,
     scope: CoroutineScope = rememberCoroutineScope(),
-): StorageScreenState = remember(backend, scope) { StorageScreenState(backend, scope) }
+    onSharedRootsChanged: () -> Unit = {},
+): StorageScreenState = remember(backend, scope) {
+    StorageScreenState(backend, scope, onSharedRootsChanged)
+}
