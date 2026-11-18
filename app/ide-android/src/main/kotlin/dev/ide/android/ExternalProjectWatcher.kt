@@ -73,7 +73,7 @@ internal class ExternalProjectWatcher(
             override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
                 val name = file.fileName?.toString() ?: return FileVisitResult.CONTINUE
                 hash = hash * 31 + name.hashCode()
-                hash = hash * 31 + attrs.size
+                hash = hash * 31 + attrs.size()
                 hash = hash * 31 + attrs.lastModifiedTime().toMillis()
                 return if (++entries > MAX_ENTRIES) FileVisitResult.TERMINATE else FileVisitResult.CONTINUE
             }
